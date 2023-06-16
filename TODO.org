@@ -1,0 +1,264 @@
+sktl/containers
+
+* TODO span/range interface
+** TODO sort, is_sorted, binary_search
+** TODO find, find_if, find_if_not
+** TODO all_of, any_of, none_of
+** TODO copy, copy_if
+** TODO move, move_if
+** TODO remove, remove_if
+** TODO replace, replace_if
+** TODO fill, transform
+** TODO generate
+** TODO sample (with handle to rng engine)
+
+
+* TODO contiguous containers
+** TODO bump pointer allocator
+
+#+BEGIN_SRC cpp
+  class BumpPtrAllocator {
+    constexpr int SlabSize = 4096;
+    SmallVector<void*, 4> Slabs;
+    void *CurPtr, *End;
+   private:
+    void *Allocate(int Size) {
+      if (Size >= (End - CurPtr)) {
+	CurPtr = malloc(SlabSize);
+	End = CurPtr + SlabSize;
+	Slabs.push_back(CurPtr);
+      }
+      void *Ptr = CurPtr;
+      CurPtr += size;
+      return Ptr;
+    }
+    // ...
+  };
+#+END_SRC
+
+** TODO static vector
+
+#+BEGIN_SRC cpp
+  template <typename T>
+  class SmallVectorImpl {
+    T *Begin, *End;
+    size_t Capacity;
+   protected:
+    SmallVectorImpl(T *Begin, T *End, size_t Capacity);
+   public:
+    iterator begin() { return Begin; }
+    iterator end() { return End; }
+    void push_back(const T& element);
+    void pop_back();
+    // ...
+  };
+
+  template <typename T, int N>
+  class SmallVector : public SmallVectorImpl<T> {
+    char Buffer[sizeof(T) * N];
+   public:
+    SmallVector() : SmallVectorImpl((T*)Buffer, (T*)Buffer, N) {}
+  };
+#+END_SRC
+
+** TODO dynamic vector
+
+
+* TODO associative containers
+** TODO static hash map
+generates hash function based on input
+** TODO dynamic hash map
+open addressing, local (within cache-line) probing
+** TODO static hash set
+** TODO dynamic hash set
+
+#+BEGIN_SRC cpp
+  template <typename T>
+  struct DenseSetTraits {
+    static T getEmpty();
+    static T getTombstone();
+    static size_t getHash(const T &X);
+    static bool compare(const T &LHS, const T &RHS);
+  };
+
+  template <typename T, int N, typename Traits = DenseSetTraits<T>>
+  class SmallDenseSet {
+    T *Buckets;
+    size_t Size, NumTombstones, BucketsSize;
+    char Buffer[sizeof(T) * N];
+   public:
+    SmallDenseSet() : Buckets((T*)Buffer), Size(0), NumTombstones(0), BucketsSize(N) {}
+    // ...
+  };
+
+  template <typename KeyT, typename ValueT, int N, typename Traits = DenseSetTraits<KeyT>>
+  class SmallDenseMap {
+    typedef std::pair<KeyT, ValueT> PairT;
+    PairT *Buckets;
+    size_t Size, NumTombstones, BucketsSize;
+    char Buffer[sizeof(PairT) * N];
+   public:
+    SmallDenseMap() : Buckets((T*)Buffer), Size(0), NumTombstones(0), BucketsSize(N) {}
+  };
+#+END_SRC
+
+** TODO static btree
+** TODO dynamic btree
+
+maybe
+
+
+* TODO embedded types (to keep both keys and value small)
+
+#+BEGIN_SRC cpp
+  // Pointer-like means you can be converted to and from an integer with the same number of bits as a pointer.
+  // Also means we can look at you and determine how many free bits there are in the object.
+  template <typename PtrT>
+  struct PointerLikeTraits {
+    constexpr int FreeBits = log2(alignof(PtrT));
+    static auto getPointer(uintptr_t Value) {
+      return (PtrT)(Value);
+    }
+  };
+
+  template <typename PtrT, int IntBits, typename IntT = unsigned, typename PtrTraits = PointerLikeTraits<PtrT>>
+  class PointerIntPair {
+    constexpr int IntShift = PtrTraits::FreeBits - IntBits;
+    constexpr uintptr_t IntMask = (uintptr_t)(((intptr_t)1 << IntBits) - 1);
+    constexpr uintptr_t PtrMask = ~(uintptr_t)(((intptr_t)1 << PtrTraits::FreeBits) - 1);
+    uintptr_t Value;
+   public:
+    auto getPointer() const {
+      return PtrTraits::getPointer(Value & PtrMask);
+    }
+    auto getInt() const {
+      return (IntT)((Value >> IntShift) & IntMask);
+    }
+    // ...
+  };
+
+  // Sometimes indices instead of pointers but indices look like pointers
+  // Takes an integer type, its bit count, and stores the integer in the high bits of the integer
+  template <typename IntT, int Bits = sizeof(IntT) * CHAR_BIT>
+  class PointerEmbeddedInt {
+    constexpr int Shift = sizeof(uintptr_t) * CHAR_BIT - Bits;
+    uintptr_t Value;
+   public:
+    PointerEmbeddedInt(uintptr_t Value) : Value(Value) {}
+    void set(IntT i) {
+      Value = (uintptr_t)(i) << Shift;
+    }
+    auto get() const {
+      return (IntT)(Value >> Shift);
+    }
+  };
+
+  // This lets users define their own pointer with embeddings.
+  template <typename IntT, int Bits>>
+  struct PointerLikeTraits<PointerEmbeddedInt<IntT, Bits>> {
+    constexpr int FreeBits = sizeof(uintptr_t) * CHAR_BIT - Bits;
+    static auto getPointer(uintptr_t Value) {
+      return PointerEmbeddedInt<IntT, Bits>(Value);
+    }
+  };
+
+  // Turns out a pointer integer pair is a pointer like type as well
+  template <typename PtrT, int IntBits, typename IntT, typename PtrTraits>
+  struct PointerLikeTraits<PointerIntPair<PtrT, IntBits, IntT, PtrTraits>> {
+    constexpr int FreeBits = PtrTraits::FreeBits - IntBits;
+    // ...
+  };
+
+  PointerIntPair< PointerIntPair< S*, 1, bool>, 1, bool> PtrAndTwoBools;
+
+  // Pointer Sum Type.
+  // PointerTypeMember binds PtrT to PtrTraits = PointerLikeTraits<T>
+  template <uintptr_t N, typename PtrT, typename PtrTraits = PointerLikeTraits<T>>
+  struct PointerTypeMember;
+
+  template <typename Tag, typename... MemberTs>
+  struct PointerSumTypeHelper;
+
+  template <typename TagT, typename... MemberTs>
+  class PointerSumType {
+    using HelperT = detail::PointerSumTypeHelper<TagT, MemberTs...>;
+    template <TagT N> using TagPtrT = HelperT::template Lookup<N>::PtrT;
+    template <TagT N> using TagPtrTraits = HelperT::template Lookup<N>::PtrTraits;
+    uintptr_t Value;
+   public:
+    auto getTag() const {
+      return (TagT)(Value & HelperT::TagMask);
+    }
+    template <TagT N> bool is() const {
+      reutnr N == getTag();
+    }
+    template <TagT N> auto get const {
+      return TagPtrTraits<N>::getFromInt(is<N>() ? (Value & HelperT::PtrMask) : 0u);
+    }
+  };
+#+END_SRC
+
+This helps make tiny pointer vector
+
+#+BEGIN_SRC cpp
+  template <typename T>
+  class TinyPtrVector {
+    enum State { Inline, Vector };
+    typedef SmallVector<T, 4> VecT;
+    typedef PointerSumType<State, PointerSumTypeMember<Inline, T>, PointerSumTypeMember<Vector, std::unique_ptr<VecT>>> SumT:
+    SumT value;
+   public:
+    T &operator[](int i) const {
+      if (Value.template is<Inline>()) {
+	assert(i == 0);
+	return Value.template get<Inline>();
+      }
+      return (*Value.template get<Vector>())[i];
+    }
+    // ...
+  };
+
+  // Example of use of TinyPtrVector is creating a multimap.
+  template <typename KeyT, typename ValueT>
+  using SmallMultiMap = SmallDenseMap<KeyT, TinyPtrVector<ValueT>>;
+#+END_SRC
+
+
+
+
+* TODO small map,set vector to embed ordering to kv pairs.
+
+#+BEGIN_SRC cpp
+    template <typename T, int N, typename VectorT = SmallVector<T, N>, typename SetT = SmallDenseSet<T, N>>
+    class SmallSetVector {
+      SetT S;
+      VectorT V;
+     public:
+      bool insert(const T &X) {
+	bool Result = S.insert(X).second;
+	if (Result) V.push_back(X);
+	return Result;
+      }
+      VectorT::iterator begin() { return V.begin(); }
+      VectorT::iterator end() { return V.end(); }
+    };
+
+    // You can this d.s. to use a single buffer between the map and the set and modify the map to use linear probing.
+    template <typename KeyT, typename ValueT, int N, typename VectorT = SmallVector<std::pair<KeyT, ValueT>, N>, typename MapT = SmallDenseMap<KeyT, int, N>>
+    class SmallMapVector {
+      MapT M;
+      VectorT V;
+     public:
+      ValueT &operator[](const KeyT &K) {
+	auto InsertResult = M.insert({K, 0});
+	int &Index = InsertResult.first->second;
+	if (InsertResult.second) {
+	  V.push_back({K, ValueT()});
+	  Index = V.size() - 1;
+	}
+	return V[Index];
+      }
+      VectorT::iterator begin() { return V.begin(); }
+      VectorT::iterator end() { return V.end(); }
+    };
+#+END_SRC
